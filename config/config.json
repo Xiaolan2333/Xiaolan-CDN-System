@@ -1,0 +1,39 @@
+{
+  "admin": {
+    "username": "admin",
+    "password": "admin123"
+  },
+  "security": {
+    "login_max_attempts": 5,
+    "login_window_seconds": 600,
+    "login_block_seconds": 900
+  },
+  "database": {
+    "host": "127.0.0.1",
+    "port": 3306,
+    "user": "root",
+    "password": "your_password",
+    "dbname": "xiaolan-cdn"
+  },
+  "http": {
+    "listen": "0.0.0.0:8080",
+    "tls": {
+      "enabled": false,
+      "cert_file": "./config/cert.pem",
+      "key_file": "./config/cert.key"
+    }
+  },
+  "node": {
+    "config_dir": "/opt/xiaolan-cdn/xiaolan-cdn-node/conf",
+    "logs_dir": "/opt/xiaolan-cdn/xiaolan-cdn-node/logs",
+    "nginx_path": "/opt/xiaolan-cdn/xiaolan-cdn-node/sbin/nginx"
+  },
+  "tmp": {
+    "conf_dir": "./tmp/conf",
+    "log_dir": "./tmp/log"
+  },
+  "schedule": {
+    "sync_interval": 300,
+    "log_collect_interval": 60
+  }
+}

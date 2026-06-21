@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Xiaolan-CDN</title>
+<link rel="icon" href="/favicon.ico" type="image/x-icon">
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+<div id="login-overlay" class="login-overlay">
+  <div class="login-box">
+    <h2>Xiaolan-CDN</h2>
+    <p class="login-subtitle">请登录管理面板</p>
+    <div class="form-group">
+      <label>账号</label>
+      <input id="login-username" type="text" placeholder="请输入账号" autocomplete="username">
+    </div>
+    <div class="form-group">
+      <label>密码</label>
+      <input id="login-password" type="password" placeholder="请输入密码" autocomplete="current-password">
+    </div>
+    <div id="login-error" class="login-error" style="display:none"></div>
+    <button class="btn btn-primary login-btn" onclick="doLogin()">登 录</button>
+  </div>
+</div>
+
+<div id="app" style="display:none">
+  <header class="header">
+    <h1>Xiaolan-CDN</h1>
+    <nav class="tabs">
+      <button class="tab active" data-tab="sites">站点管理</button>
+      <button class="tab" data-tab="ssl">SSL证书</button>
+      <button class="tab" data-tab="lua">Lua脚本</button>
+      <button class="tab" data-tab="nodes">节点管理</button>
+      <button class="tab" data-tab="logs-access">访问日志</button>
+      <button class="tab" data-tab="logs-system">系统日志</button>
+    </nav>
+    <div class="actions-bar">
+      <button class="btn btn-primary" onclick="forceSync()">手动同步</button>
+      <button class="btn btn-outline btn-sm" onclick="doLogout()">退出</button>
+      <span id="sync-status" class="status-text"></span>
+    </div>
+  </header>
+
+  <main id="content"></main>
+</div>
+
+<script src="/js/app.js"></script>
+</body>
+</html>
