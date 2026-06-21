@@ -6,4 +6,4 @@ curl -L https://github.com/Xiaolan2333/Xiaolan-CDN-System/releases/download/Xiao
 ```
 
 ## 节点仓库地址：
-[https://github.com/Xiaolan2333/Xiaolan-CDN-Node](https://github.com/Xiaolan2333/Xiaolan-CDN-System)
+[https://github.com/Xiaolan2333/Xiaolan-CDN-Node](https://github.com/Xiaolan2333/Xiaolan-CDN-Node)
