@@ -323,12 +323,13 @@ async function showSiteDetail(siteId) {
   h += `<div class="section"><h4>分路径回源规则 (支持正则)</h4>`;
   h += `<div class="inline-form">
     <select id="new-po-scheme"><option value="http">HTTP</option><option value="https">HTTPS</option></select>
-    <input id="new-po-pattern" placeholder="路径正则 (如 ^/api/)" style="width:180px">
-    <input id="new-po-addr" placeholder="回源地址" style="width:180px">
-    <input id="new-po-host" placeholder="回源Host" style="width:160px">
+    <input id="new-po-pattern" placeholder="路径正则 (如 ^/api/)" style="width:160px">
+    <input id="new-po-addr" placeholder="回源地址" style="width:160px">
+    <input id="new-po-host" placeholder="回源Host" style="width:140px">
+    <select id="new-po-lua" style="width:120px"><option value="">无Lua</option>${luaCache.map(l => `<option value="${l.id}">${esc(l.name)}</option>`).join('')}</select>
     <button class="btn btn-primary btn-sm" onclick="addPathOrigin(${siteId})">添加</button></div>`;
   (pathOrigin.data||[]).forEach(p => {
-    h += `<div class="inline-item"><span>${esc(p.origin_scheme)}://${esc(p.origin_address)} | ${esc(p.path_pattern)} | Host:${esc(p.origin_host||'默认')}</span><button class="btn btn-danger btn-sm" onclick="delPathOrigin(${siteId},${p.id})">删除</button></div>`;
+    h += `<div class="inline-item"><span>${esc(p.origin_scheme)}://${esc(p.origin_address)} | ${esc(p.path_pattern)} | Host:${esc(p.origin_host||'默认')}${p.lua_script_id?' | Lua:已绑定':''}</span><button class="btn btn-danger btn-sm" onclick="delPathOrigin(${siteId},${p.id})">删除</button></div>`;
   });
   h += '</div>';
 
@@ -428,8 +429,9 @@ async function addPathOrigin(siteId) {
   const pattern = document.getElementById('new-po-pattern').value.trim();
   const addr = document.getElementById('new-po-addr').value.trim();
   const host = document.getElementById('new-po-host').value.trim();
+  const luaId = parseInt(gv('new-po-lua')) || null;
   if (!pattern || !addr) return;
-  await API.post(`/api/site/${siteId}/pathorigin`, {path_pattern:pattern, origin_scheme:scheme, origin_address:addr, origin_host:host});
+  await API.post(`/api/site/${siteId}/pathorigin`, {path_pattern:pattern, origin_scheme:scheme, origin_address:addr, origin_host:host, lua_script_id:luaId});
   showSiteDetail(siteId);
 }
 async function delPathOrigin(siteId, id) { await API.del(`/api/site/${siteId}/pathorigin/${id}`); showSiteDetail(siteId); }

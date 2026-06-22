@@ -258,15 +258,12 @@ func doCachePurge(nodesJSON, nginxPath, purgeURL string) {
 	path := purgeURL[slashIdx:]
 
 	for _, node := range nodes {
-		purgeCmd := fmt.Sprintf("curl -s -o /dev/null -w '%%{http_code}' -X PURGE http://127.0.0.1%s -H 'Host: %s'", path, host)
-		output, err := sshExecOutput(node, purgeCmd)
+		purgeCmd := fmt.Sprintf("curl -s -o /dev/null -w '%%{http_code}' -H 'Host: %s' -H 'X-Purge: 1' http://127.0.0.1%s", host, path)
+		ss, err := sshExecOutput(node, purgeCmd)
 		if err != nil {
 			fmt.Printf("[FAIL] %s: cache purge failed - %v\n", node.Name, err)
 		} else {
-			fmt.Printf("[OK] %s: cache purge - HTTP %s\n", node.Name, strings.TrimSpace(output))
+			fmt.Printf("[OK] %s: cache purge - HTTP %s\n", node.Name, strings.TrimSpace(ss))
 		}
-
-		cleanCmd := "find /opt/xiaolan-cdn/xiaolan-cdn-node/cache -type f -delete 2>/dev/null; echo done"
-		sshExec(node, cleanCmd)
 	}
 }

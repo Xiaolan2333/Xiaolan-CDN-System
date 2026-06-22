@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -81,8 +82,6 @@ type Config struct {
 
 var config Config
 var db *sql.DB
-var configChanged bool
-var configChangedMu sync.Mutex
 
 func loadConfig(path string) error {
 	data, err := os.ReadFile(path)
@@ -404,6 +403,7 @@ type PathOriginRule struct {
 	OriginScheme  string `json:"origin_scheme"`
 	OriginAddress string `json:"origin_address"`
 	OriginHost    string `json:"origin_host"`
+	LuaScriptID   *int   `json:"lua_script_id"`
 	SortOrder     int    `json:"sort_order"`
 }
 
@@ -484,24 +484,19 @@ func writeSystemLog(level, category, message, detail string) {
 var syncRunningMu sync.Mutex
 var syncRunning bool
 
-func markConfigChanged() {
-	configChangedMu.Lock()
-	configChanged = true
-	configChangedMu.Unlock()
+var dirtyCount int32
 
+func markConfigChanged() {
+	atomic.AddInt32(&dirtyCount, 1)
 	go doFullSync()
 }
 
 func hasConfigChanged() bool {
-	configChangedMu.Lock()
-	defer configChangedMu.Unlock()
-	return configChanged
+	return atomic.LoadInt32(&dirtyCount) > 0
 }
 
-func resetConfigChanged() {
-	configChangedMu.Lock()
-	configChanged = false
-	configChangedMu.Unlock()
+func clearDirty() {
+	atomic.AddInt32(&dirtyCount, -1)
 }
 
 // ==================== Sync Operations ====================
@@ -586,8 +581,12 @@ func doFullSync() {
 	os.RemoveAll(config.Tmp.ConfDir)
 	os.RemoveAll(config.Tmp.LogDir)
 
-	resetConfigChanged()
+	clearDirty()
 	writeSystemLog("INFO", "sync", "Full sync completed", "")
+	// If another change happened during sync, re-trigger
+	if hasConfigChanged() {
+		go doFullSync()
+	}
 }
 
 func doLogCollect() {
@@ -1300,7 +1299,7 @@ func handlePathOriginRules(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case "GET":
-		rows, err := db.Query("SELECT id, site_id, path_pattern, origin_scheme, origin_address, origin_host, sort_order FROM path_origin_rules WHERE site_id=? ORDER BY sort_order", siteID)
+		rows, err := db.Query("SELECT id, site_id, path_pattern, origin_scheme, origin_address, origin_host, lua_script_id, sort_order FROM path_origin_rules WHERE site_id=? ORDER BY sort_order", siteID)
 		if err != nil {
 			errorResponse(w, 500, err.Error())
 			return
@@ -1309,7 +1308,7 @@ func handlePathOriginRules(w http.ResponseWriter, r *http.Request) {
 		var rules []PathOriginRule
 		for rows.Next() {
 			var pr PathOriginRule
-			if err := rows.Scan(&pr.ID, &pr.SiteID, &pr.PathPattern, &pr.OriginScheme, &pr.OriginAddress, &pr.OriginHost, &pr.SortOrder); err != nil {
+			if err := rows.Scan(&pr.ID, &pr.SiteID, &pr.PathPattern, &pr.OriginScheme, &pr.OriginAddress, &pr.OriginHost, &pr.LuaScriptID, &pr.SortOrder); err != nil {
 				errorResponse(w, 500, err.Error())
 				return
 			}
@@ -1329,8 +1328,8 @@ func handlePathOriginRules(w http.ResponseWriter, r *http.Request) {
 		if pr.OriginScheme == "" {
 			pr.OriginScheme = "http"
 		}
-		_, err := db.Exec("INSERT INTO path_origin_rules (site_id, path_pattern, origin_scheme, origin_address, origin_host, sort_order) VALUES (?,?,?,?,?,?)",
-			siteID, pr.PathPattern, pr.OriginScheme, pr.OriginAddress, pr.OriginHost, pr.SortOrder)
+		_, err := db.Exec("INSERT INTO path_origin_rules (site_id, path_pattern, origin_scheme, origin_address, origin_host, lua_script_id, sort_order) VALUES (?,?,?,?,?,?,?)",
+			siteID, pr.PathPattern, pr.OriginScheme, pr.OriginAddress, pr.OriginHost, pr.LuaScriptID, pr.SortOrder)
 		if err != nil {
 			errorResponse(w, 500, err.Error())
 			return

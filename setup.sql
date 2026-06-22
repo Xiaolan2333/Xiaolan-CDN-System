@@ -89,6 +89,7 @@ CREATE TABLE IF NOT EXISTS path_origin_rules (
     origin_scheme VARCHAR(10) NOT NULL DEFAULT 'http',
     origin_address VARCHAR(500) NOT NULL,
     origin_host VARCHAR(255) NOT NULL DEFAULT '',
+    lua_script_id INT DEFAULT NULL,
     sort_order INT NOT NULL DEFAULT 0,
     FOREIGN KEY (site_id) REFERENCES sites(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

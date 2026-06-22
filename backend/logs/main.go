@@ -192,10 +192,6 @@ func collectLogsFromNode(node Node, logDir, tmpDir string) ([]AccessLogEntry, er
 	}
 	outFile.Close()
 
-	// Clean remote immediately after download to avoid re-downloading
-	cleanCmd := fmt.Sprintf("find %s \\( -name 'access.log.*' -o -name 'error.log.*' \\) -type f -mmin +1 -delete 2>/dev/null; truncate -s 0 %s/access.log %s/error.log 2>/dev/null", logDir, logDir, logDir)
-	sshExec(node, cleanCmd)
-
 	// Extract tar.gz
 	extractDir := filepath.Join(nodeTmpDir, "extracted")
 	os.MkdirAll(extractDir, 0755)
@@ -226,6 +222,10 @@ func collectLogsFromNode(node Node, logDir, tmpDir string) ([]AccessLogEntry, er
 		entries = append(entries, parsed...)
 		return nil
 	})
+
+	// Clean remote after successful parsing
+	cleanCmd := fmt.Sprintf("find %s \\( -name 'access.log.*' -o -name 'error.log.*' \\) -type f -mmin +1 -delete 2>/dev/null; truncate -s 0 %s/access.log %s/error.log 2>/dev/null", logDir, logDir, logDir)
+	sshExec(node, cleanCmd)
 
 	return entries, nil
 }

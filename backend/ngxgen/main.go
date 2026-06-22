@@ -59,6 +59,9 @@ type PathOriginRule struct {
 	OriginScheme  string
 	OriginAddress string
 	OriginHost    string
+	LuaScriptID   *int
+	LuaContent    string
+	LuaName       string
 }
 
 type LuaBinding struct {
@@ -141,6 +144,8 @@ http {
     default_type application/octet-stream;
 
     lua_package_path "/opt/xiaolan-cdn/xiaolan-cdn-node/lib/lua/?.lua;;";
+
+    proxy_cache_path /opt/xiaolan-cdn/xiaolan-cdn-node/cache/proxy levels=1:2 keys_zone=xiaolan_cache:100m max_size=10g inactive=7d use_temp_path=off;
 
     log_format xiaolan_cdn '$status $host "$request" $remote_addr [$time_local] '
                            '"$http_cookie" "$http_user_agent" $body_bytes_sent';
@@ -243,7 +248,11 @@ func getCacheRules(db *sql.DB, siteID int) []CacheRule {
 }
 
 func getPathOriginRules(db *sql.DB, siteID int) []PathOriginRule {
-	rows, err := db.Query("SELECT path_pattern, origin_scheme, origin_address, origin_host FROM path_origin_rules WHERE site_id=? ORDER BY sort_order", siteID)
+	rows, err := db.Query(`SELECT por.path_pattern, por.origin_scheme, por.origin_address, 
+		COALESCE(por.origin_host,''), por.lua_script_id, COALESCE(ls.name,''), COALESCE(ls.content,'')
+		FROM path_origin_rules por
+		LEFT JOIN lua_scripts ls ON ls.id = por.lua_script_id
+		WHERE por.site_id=? ORDER BY por.sort_order`, siteID)
 	if err != nil {
 		return nil
 	}
@@ -251,7 +260,7 @@ func getPathOriginRules(db *sql.DB, siteID int) []PathOriginRule {
 	var rules []PathOriginRule
 	for rows.Next() {
 		var r PathOriginRule
-		rows.Scan(&r.PathPattern, &r.OriginScheme, &r.OriginAddress, &r.OriginHost)
+		rows.Scan(&r.PathPattern, &r.OriginScheme, &r.OriginAddress, &r.OriginHost, &r.LuaScriptID, &r.LuaName, &r.LuaContent)
 		rules = append(rules, r)
 	}
 	return rules
@@ -417,12 +426,19 @@ func writeLocationBlock(sb *strings.Builder, site Site, db *sql.DB) {
 		}
 		sb.WriteString(fmt.Sprintf("    location %s%s {\n", locationMod, pattern))
 		sb.WriteString(fmt.Sprintf("        proxy_pass %s://%s;\n", rule.OriginScheme, rule.OriginAddress))
+		sb.WriteString("        proxy_ssl_server_name on;\n")
 		if rule.OriginScheme == "https" {
 			sb.WriteString("        proxy_ssl_verify off;\n")
 		}
 		if rule.OriginHost != "" {
 			sb.WriteString(fmt.Sprintf("        proxy_set_header Host %s;\n", rule.OriginHost))
 		}
+		if rule.LuaScriptID != nil && *rule.LuaScriptID > 0 {
+			sb.WriteString(fmt.Sprintf("        access_by_lua_file /opt/xiaolan-cdn/xiaolan-cdn-node/conf/%s.lua;\n", rule.LuaName))
+		}
+		sb.WriteString("        proxy_set_header X-Real-IP $remote_addr;\n")
+		sb.WriteString("        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n")
+		sb.WriteString("        proxy_set_header X-Forwarded-Proto $scheme;\n")
 		sb.WriteString("    }\n")
 	}
 
@@ -440,13 +456,23 @@ func writeLocationBlock(sb *strings.Builder, site Site, db *sql.DB) {
 			if ct != "" {
 				sb.WriteString(fmt.Sprintf("        expires %s;\n", ct))
 			}
+			sb.WriteString("        proxy_cache xiaolan_cache;\n")
+			sb.WriteString("        proxy_cache_key $scheme$proxy_host$uri$is_args$args;\n")
+			sb.WriteString("        proxy_cache_valid 200 301 302 1h;\n")
+			sb.WriteString("        proxy_cache_valid 404 1m;\n")
+			sb.WriteString("        proxy_cache_bypass $http_x_purge;\n")
+			sb.WriteString("        proxy_no_cache $http_x_purge;\n")
 			sb.WriteString(fmt.Sprintf("        proxy_pass %s://%s;\n", site.OriginScheme, site.OriginAddress))
+			sb.WriteString("        proxy_ssl_server_name on;\n")
 			if site.OriginScheme == "https" {
 				sb.WriteString("        proxy_ssl_verify off;\n")
 			}
 			if site.OriginHost != "" {
 				sb.WriteString(fmt.Sprintf("        proxy_set_header Host %s;\n", site.OriginHost))
 			}
+			sb.WriteString("        proxy_set_header X-Real-IP $remote_addr;\n")
+			sb.WriteString("        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n")
+			sb.WriteString("        proxy_set_header X-Forwarded-Proto $scheme;\n")
 			sb.WriteString("    }\n")
 		}
 	}
@@ -454,6 +480,7 @@ func writeLocationBlock(sb *strings.Builder, site Site, db *sql.DB) {
 	// Default location
 	sb.WriteString("    location / {\n")
 	sb.WriteString(fmt.Sprintf("        proxy_pass %s://%s;\n", site.OriginScheme, site.OriginAddress))
+	sb.WriteString("        proxy_ssl_server_name on;\n")
 	if site.OriginScheme == "https" {
 		sb.WriteString("        proxy_ssl_verify off;\n")
 	}
