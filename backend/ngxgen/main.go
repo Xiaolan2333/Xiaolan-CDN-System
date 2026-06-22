@@ -147,6 +147,11 @@ http {
 
     proxy_cache_path /opt/xiaolan-cdn/xiaolan-cdn-node/cache/proxy levels=1:2 keys_zone=xiaolan_cache:100m max_size=10g inactive=7d use_temp_path=off;
 
+    map $http_upgrade $connection_upgrade {
+        default upgrade;
+        ''      close;
+    }
+
     log_format xiaolan_cdn '$status $host "$request" $remote_addr [$time_local] '
                            '"$http_cookie" "$http_user_agent" $body_bytes_sent';
 
@@ -332,13 +337,17 @@ func generateSiteConfig(db *sql.DB, site Site, outputDir string) {
 
 		// Listen directives
 		sb.WriteString("    listen 80;\n")
+		sb.WriteString("    listen [::]:80;\n")
 		if site.HTTPSEnabled {
 			sb.WriteString("    listen 443 ssl;\n")
+			sb.WriteString("    listen [::]:443 ssl;\n")
+			if site.HTTP3Enabled {
+				sb.WriteString("    listen 443 quic;\n")
+				sb.WriteString("    listen [::]:443 quic;\n")
+				sb.WriteString("    http3 on;\n")
+			}
 			if site.HTTP2Enabled {
 				sb.WriteString("    http2 on;\n")
-			}
-			if site.HTTP3Enabled {
-				sb.WriteString("    listen 443 quic reuseport;\n")
 			}
 		}
 		sb.WriteString(fmt.Sprintf("    server_name %s;\n", serverName))
@@ -432,6 +441,8 @@ func writeLocationBlock(sb *strings.Builder, site Site, db *sql.DB) {
 		}
 		if rule.OriginHost != "" {
 			sb.WriteString(fmt.Sprintf("        proxy_set_header Host %s;\n", rule.OriginHost))
+		} else {
+			sb.WriteString("        proxy_set_header Host $host;\n")
 		}
 		if rule.LuaScriptID != nil && *rule.LuaScriptID > 0 {
 			sb.WriteString(fmt.Sprintf("        access_by_lua_file /opt/xiaolan-cdn/xiaolan-cdn-node/conf/%s.lua;\n", rule.LuaName))
@@ -469,6 +480,8 @@ func writeLocationBlock(sb *strings.Builder, site Site, db *sql.DB) {
 			}
 			if site.OriginHost != "" {
 				sb.WriteString(fmt.Sprintf("        proxy_set_header Host %s;\n", site.OriginHost))
+			} else {
+				sb.WriteString("        proxy_set_header Host $host;\n")
 			}
 			sb.WriteString("        proxy_set_header X-Real-IP $remote_addr;\n")
 			sb.WriteString("        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n")
@@ -487,13 +500,15 @@ func writeLocationBlock(sb *strings.Builder, site Site, db *sql.DB) {
 	if site.WebSocketEnabled {
 		sb.WriteString("        proxy_http_version 1.1;\n")
 		sb.WriteString("        proxy_set_header Upgrade $http_upgrade;\n")
-		sb.WriteString("        proxy_set_header Connection \"upgrade\";\n")
+		sb.WriteString("        proxy_set_header Connection $connection_upgrade;\n")
 		sb.WriteString("        proxy_read_timeout 3600s;\n")
 	} else {
 		sb.WriteString("        proxy_read_timeout 60s;\n")
 	}
 	if site.OriginHost != "" {
 		sb.WriteString(fmt.Sprintf("        proxy_set_header Host %s;\n", site.OriginHost))
+	} else {
+		sb.WriteString("        proxy_set_header Host $host;\n")
 	}
 	sb.WriteString("        proxy_set_header X-Real-IP $remote_addr;\n")
 	sb.WriteString("        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n")

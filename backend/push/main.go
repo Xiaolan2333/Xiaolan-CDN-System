@@ -145,7 +145,7 @@ func pushToNodes(nodes []Node, sourceDir, targetDir, nginxPath string) []string 
 }
 
 func pushToNode(node Node, sourceDir, targetDir, nginxPath string) string {
-	mkdirCmd := fmt.Sprintf("mkdir -p %s", targetDir)
+	mkdirCmd := fmt.Sprintf("mkdir -p %s /opt/xiaolan-cdn/xiaolan-cdn-node/cache/proxy", targetDir)
 	if err := sshExec(node, mkdirCmd); err != nil {
 		return fmt.Sprintf("[FAIL] %s: mkdir failed - %v", node.Name, err)
 	}
