@@ -2,7 +2,7 @@
 
 ## 环境要求：
 
-x86-64架构的 Debian 10~13 或 Ubuntu 18~24（Ubuntu理论支持，未测试）
+x86-64架构的 Debian 10-13 或 Ubuntu 18-24（Ubuntu理论支持，未测试）
 
 MySQL 5.7及以上
 
