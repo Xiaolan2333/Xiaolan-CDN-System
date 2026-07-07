@@ -368,7 +368,7 @@ async function showSiteDetail(siteId) {
   // === Cache purge ===
   h += `<div class="section"><h4>缓存刷新</h4>
     <div class="inline-form">
-      <input id="purge-path" placeholder="刷新路径 (留空刷新全站)" style="width:250px">
+      <input id="purge-suffix" placeholder="刷新文件后缀 (如 jpg,png，留空刷新全站)" style="width:300px">
       <button class="btn btn-danger btn-sm" onclick="purgeCache(${siteId})">执行刷新</button>
     </div></div>`;
 
@@ -449,8 +449,8 @@ async function addBlacklist(siteId) {
 }
 async function delBlacklist(siteId, id) { await API.del(`/api/site/${siteId}/blacklist/${id}`); showSiteDetail(siteId); }
 async function purgeCache(siteId) {
-  const path = document.getElementById('purge-path').value.trim();
-  const r = await API.post('/api/action/purge', {site_id:siteId, path});
+  const suffix = document.getElementById('purge-suffix').value.trim();
+  const r = await API.post('/api/action/purge', {site_id:siteId, path:suffix});
   alert(r.message);
 }
 
@@ -569,7 +569,7 @@ function showNodeModal(id) {
       <div class="form-group"><label>主机</label><input id="node-host" value="${esc(node.host)}"></div></div>
       <div class="form-row"><div class="form-group"><label>端口</label><input id="node-port" type="number" value="${node.port}"></div>
       <div class="form-group"><label>用户名</label><input id="node-user" value="${esc(node.username)}"></div></div>
-      <div class="form-group"><label>密码 (明文存储)</label><input id="node-pass" type="text" value="${esc(node.password)}"></div>
+      <div class="form-group"><label>密码</label><input id="node-pass" type="password" value="${esc(node.password)}"></div>
       <div class="modal-actions"><button class="btn btn-outline" onclick="closeModal()">取消</button>
       <button class="btn btn-primary" onclick="saveNode(${id||0})">保存</button></div>
     </div></div>`;
@@ -606,11 +606,11 @@ async function renderAccessLogs(container) {
 
   let h = `<div class="panel"><h2>访问日志
     <span style="font-weight:normal;font-size:12px;margin-left:12px">
-      <select id="access-delete-before" style="width:100px;padding:3px">
-        <option value="1">近一天</option><option value="3">近三天</option><option value="7">近七天</option>
-        <option value="14">近十四天</option><option value="30">近三十天</option><option value="all">全部</option>
+      <select id="access-delete-before" style="width:120px;padding:3px">
+        <option value="1">保留最近1天</option><option value="3">保留最近3天</option><option value="7">保留最近7天</option>
+        <option value="14">保留最近14天</option><option value="30">保留最近30天</option><option value="all">全部删除</option>
       </select>
-      <button class="btn btn-danger btn-sm" onclick="deleteLogs('access')">删除日志</button>
+      <button class="btn btn-danger btn-sm" onclick="var e=document.getElementById('access-delete-before');deleteLogs('access',e?e.value:'1')">删除日志</button>
     </span></h2>
     <div class="filter-bar">
       <div class="form-group"><label>域名</label><input id="log-filter-domain" value="${esc(domain)}" placeholder="域名筛选"></div>
@@ -658,11 +658,11 @@ async function renderSystemLogs(container) {
 
   let h = `<div class="panel"><h2>系统日志
     <span style="font-weight:normal;font-size:12px;margin-left:12px">
-      <select id="system-delete-before" style="width:100px;padding:3px">
-        <option value="1">近一天</option><option value="3">近三天</option><option value="7">近七天</option>
-        <option value="14">近十四天</option><option value="30">近三十天</option><option value="all">全部</option>
+      <select id="system-delete-before" style="width:120px;padding:3px">
+        <option value="1">保留最近1天</option><option value="3">保留最近3天</option><option value="7">保留最近7天</option>
+        <option value="14">保留最近14天</option><option value="30">保留最近30天</option><option value="all">全部删除</option>
       </select>
-      <button class="btn btn-danger btn-sm" onclick="deleteLogs('system')">删除日志</button>
+      <button class="btn btn-danger btn-sm" onclick="var e=document.getElementById('system-delete-before');deleteLogs('system',e?e.value:'1')">删除日志</button>
     </span></h2>
     <div class="filter-bar">
       <div class="form-group"><label>级别</label><select id="syslog-level"><option value="">全部</option><option value="INFO" ${level==='INFO'?'selected':''}>INFO</option><option value="WARN" ${level==='WARN'?'selected':''}>WARN</option><option value="ERROR" ${level==='ERROR'?'selected':''}>ERROR</option></select></div>
@@ -710,12 +710,19 @@ function gc(id) { const e = document.getElementById(id); return e ? e.checked : 
 function showModalHTML(html) { const d = document.createElement('div'); d.innerHTML = html; document.body.appendChild(d.firstElementChild); }
 function closeModal() { const m = document.querySelector('.modal'); if (m) m.remove(); }
 function statusTag(code) { if (code >= 200 && code < 300) return `<span class="tag tag-success">${code}</span>`; if (code >= 400 && code < 500) return `<span class="tag" style="background:#fff3cd">${code}</span>`; if (code >= 500) return `<span class="tag tag-danger">${code}</span>`; return `<span class="tag">${code}</span>`; }
-async function deleteLogs(type) {
-  const el = document.getElementById(type + '-delete-before');
-  const before = el ? el.value : '1';
+async function deleteLogs(type, before) {
   if (before === 'all' && !confirm('确认删除全部日志？此操作不可恢复！')) return;
-  const r = await API.del(`/api/logs/${type}?before=${before}`);
-  alert(r.message);
+  try {
+    const r = await fetch(`/api/logs/${type}?before=${before}`, {
+      method: 'DELETE',
+      headers: { 'Authorization': 'Bearer ' + authToken }
+    });
+    const d = await r.json();
+    const msg = (d.data && d.data.message) || d.message || '删除完成';
+    alert(msg);
+  } catch(e) {
+    alert('删除失败: ' + e.message);
+  }
   if (type === 'access') renderAccessLogs(document.getElementById('content'));
   else renderSystemLogs(document.getElementById('content'));
 }

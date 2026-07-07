@@ -92,7 +92,7 @@ func loadConfig(path string) error {
 }
 
 func (d DBConfig) DSN() string {
-	return fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?charset=utf8mb4&parseTime=true&loc=Local",
+	return fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?charset=utf8mb4&parseTime=true&loc=UTC",
 		d.User, d.Password, d.Host, d.Port, d.DBName)
 }
 
@@ -115,6 +115,7 @@ func generateToken() string {
 // ==================== Brute-Force Rate Limiter ====================
 
 type loginAttemptInfo struct {
+	mu           sync.Mutex
 	Count        int
 	FirstAttempt time.Time
 	BlockedUntil time.Time
@@ -146,6 +147,8 @@ func isLoginBlocked(ip string) (bool, int) {
 		return false, 0
 	}
 	info := val.(*loginAttemptInfo)
+	info.mu.Lock()
+	defer info.mu.Unlock()
 	if !info.BlockedUntil.IsZero() && time.Now().Before(info.BlockedUntil) {
 		remaining := int(time.Until(info.BlockedUntil).Seconds())
 		return true, remaining
@@ -179,10 +182,12 @@ func recordLoginAttempt(ip string, success bool) {
 
 	val, _ := loginAttempts.LoadOrStore(ip, &loginAttemptInfo{Count: 0, FirstAttempt: time.Now()})
 	info := val.(*loginAttemptInfo)
+	info.mu.Lock()
 	info.Count++
 	if info.Count >= maxAttempts {
 		info.BlockedUntil = time.Now().Add(time.Duration(blockSec) * time.Second)
 	}
+	info.mu.Unlock()
 }
 
 func startLoginAttemptCleanup() {
@@ -200,7 +205,10 @@ func startLoginAttemptCleanup() {
 			now := time.Now()
 			loginAttempts.Range(func(key, value interface{}) bool {
 				info := value.(*loginAttemptInfo)
-				if time.Since(info.FirstAttempt) > window && (info.BlockedUntil.IsZero() || now.After(info.BlockedUntil)) {
+				info.mu.Lock()
+				expired := time.Since(info.FirstAttempt) > window && (info.BlockedUntil.IsZero() || now.After(info.BlockedUntil))
+				info.mu.Unlock()
+				if expired {
 					loginAttempts.Delete(key)
 				}
 				return true
@@ -324,6 +332,7 @@ func initDB() {
 		log.Printf("Database not available: %v, retrying in 5s...", err)
 		time.Sleep(5 * time.Second)
 	}
+	db.Exec("SET time_zone = '+00:00'")
 	log.Println("Database connected")
 }
 
@@ -456,6 +465,14 @@ func jsonResponse(w http.ResponseWriter, code int, msg string, data interface{})
 	json.NewEncoder(w).Encode(resp)
 }
 
+func rowsOK(rows *sql.Rows, w http.ResponseWriter) bool {
+	if err := rows.Err(); err != nil {
+		errorResponse(w, 500, "DB read error: "+err.Error())
+		return false
+	}
+	return true
+}
+
 func successResponse(w http.ResponseWriter, data interface{}) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	resp := APIResponse{Code: 0, Message: "success", Data: data}
@@ -484,11 +501,35 @@ func writeSystemLog(level, category, message, detail string) {
 var syncRunningMu sync.Mutex
 var syncRunning bool
 
+var logCollectRunning bool
+var logCollectMu sync.Mutex
+
 var dirtyCount int32
+var syncCh = make(chan struct{}, 1)
 
 func markConfigChanged() {
 	atomic.AddInt32(&dirtyCount, 1)
-	go doFullSync()
+	select {
+	case syncCh <- struct{}{}:
+	default:
+	}
+}
+
+func startSyncWorker() {
+	go func() {
+		var timer *time.Timer
+		for {
+			select {
+			case <-syncCh:
+				if timer != nil {
+					timer.Stop()
+				}
+				timer = time.AfterFunc(3*time.Second, func() {
+					go doFullSync()
+				})
+			}
+		}
+	}()
 }
 
 func hasConfigChanged() bool {
@@ -496,7 +537,15 @@ func hasConfigChanged() bool {
 }
 
 func clearDirty() {
-	atomic.AddInt32(&dirtyCount, -1)
+	for {
+		v := atomic.LoadInt32(&dirtyCount)
+		if v <= 0 {
+			return
+		}
+		if atomic.CompareAndSwapInt32(&dirtyCount, v, v-1) {
+			return
+		}
+	}
 }
 
 // ==================== Sync Operations ====================
@@ -590,6 +639,19 @@ func doFullSync() {
 }
 
 func doLogCollect() {
+	logCollectMu.Lock()
+	if logCollectRunning {
+		logCollectMu.Unlock()
+		return
+	}
+	logCollectRunning = true
+	logCollectMu.Unlock()
+	defer func() {
+		logCollectMu.Lock()
+		logCollectRunning = false
+		logCollectMu.Unlock()
+	}()
+
 	log.Println("Starting log collection...")
 	writeSystemLog("INFO", "log_collect", "Log collection started", "")
 
@@ -680,6 +742,7 @@ func handleSSLCerts(w http.ResponseWriter, r *http.Request) {
 			}
 			certs = append(certs, c)
 		}
+		if !rowsOK(rows, w) { return }
 		successResponse(w, certs)
 	case "POST":
 		var c SSLCertificate
@@ -769,6 +832,7 @@ func handleLuaScripts(w http.ResponseWriter, r *http.Request) {
 			}
 			scripts = append(scripts, s)
 		}
+		if !rowsOK(rows, w) { return }
 		successResponse(w, scripts)
 	case "POST":
 		var s LuaScript
@@ -856,6 +920,7 @@ func handleNodes(w http.ResponseWriter, r *http.Request) {
 			}
 			nodes = append(nodes, n)
 		}
+		if !rowsOK(rows, w) { return }
 		successResponse(w, nodes)
 	case "POST":
 		var n Node
@@ -961,7 +1026,8 @@ func handleSites(w http.ResponseWriter, r *http.Request) {
 			s.WebSocketEnabled = ws == 1
 			sites = append(sites, s)
 		}
-		successResponse(w, sites)
+		if !rowsOK(rows, w) { return }
+		successResponse(w, sites)      // from handleSites
 	case "POST":
 		var s Site
 		if err := json.NewDecoder(r.Body).Decode(&s); err != nil {
@@ -1092,6 +1158,7 @@ func handleSiteDomains(w http.ResponseWriter, r *http.Request) {
 			}
 			domains = append(domains, d)
 		}
+		if !rowsOK(rows, w) { return }
 		successResponse(w, domains)
 	case "POST":
 		var d SiteDomain
@@ -1497,7 +1564,7 @@ func handleAccessLogs(w http.ResponseWriter, r *http.Request) {
 			if days <= 0 {
 				days = 1
 			}
-			result, err = db.Exec("DELETE FROM access_logs WHERE request_time < DATE_SUB(NOW(), INTERVAL ? DAY)", days)
+			result, err = db.Exec("DELETE FROM access_logs WHERE request_time < NOW() - INTERVAL ? DAY", days)
 		}
 		if err != nil {
 			errorResponse(w, 500, err.Error())
@@ -1505,7 +1572,7 @@ func handleAccessLogs(w http.ResponseWriter, r *http.Request) {
 		}
 		n, _ := result.RowsAffected()
 		writeSystemLog("INFO", "system", "Access logs deleted", fmt.Sprintf("before=%s, rows=%d", before, n))
-		successResponse(w, map[string]int64{"deleted": n})
+		successResponse(w, map[string]interface{}{"deleted": n, "message": fmt.Sprintf("已删除 %d 条日志", n)})
 		return
 	}
 	if r.Method != "GET" {
@@ -1591,7 +1658,7 @@ func handleSystemLogs(w http.ResponseWriter, r *http.Request) {
 			if days <= 0 {
 				days = 1
 			}
-			result, err = db.Exec("DELETE FROM system_logs WHERE created_at < DATE_SUB(NOW(), INTERVAL ? DAY)", days)
+			result, err = db.Exec("DELETE FROM system_logs WHERE created_at < NOW() - INTERVAL ? DAY", days)
 		}
 		if err != nil {
 			errorResponse(w, 500, err.Error())
@@ -1599,7 +1666,7 @@ func handleSystemLogs(w http.ResponseWriter, r *http.Request) {
 		}
 		n, _ := result.RowsAffected()
 		writeSystemLog("INFO", "system", "System logs deleted", fmt.Sprintf("before=%s, rows=%d", before, n))
-		successResponse(w, map[string]int64{"deleted": n})
+		successResponse(w, map[string]interface{}{"deleted": n, "message": fmt.Sprintf("已删除 %d 条日志", n)})
 		return
 	}
 	if r.Method != "GET" {
@@ -1681,7 +1748,7 @@ func handleCachePurge(w http.ResponseWriter, r *http.Request) {
 	}
 	var req struct {
 		SiteID int    `json:"site_id"`
-		Path   string `json:"path"`
+		Suffix string `json:"path"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		errorResponse(w, 400, "Invalid JSON")
@@ -1692,76 +1759,75 @@ func handleCachePurge(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get site domains
-	rows, err := db.Query("SELECT domain FROM site_domains WHERE site_id=?", req.SiteID)
-	if err != nil {
-		errorResponse(w, 500, err.Error())
-		return
-	}
-	var domains []string
-	for rows.Next() {
-		var d string
-		rows.Scan(&d)
-		domains = append(domains, d)
-	}
-	rows.Close()
-
-	if len(domains) == 0 {
-		errorResponse(w, 400, "No domains configured for this site")
-		return
-	}
-
-	// Execute cache purge via SSH on all nodes
+	// Execute cache purge on all nodes
 	nodes, err := getAllNodes()
 	if err != nil {
 		errorResponse(w, 500, err.Error())
 		return
 	}
-
-	purgePath := req.Path
-	if purgePath == "" {
-		purgePath = "/"
-	}
-
-	var wg sync.WaitGroup
-	errCh := make(chan string, len(nodes))
-
-	for _, node := range nodes {
-		wg.Add(1)
-		go func(n Node) {
-			defer wg.Done()
-			// Use push module for SSH - send a cache purge command
-			pushPath := filepath.Join(".", "backend", "push", "main")
-			for _, domain := range domains {
-				cmd := exec.Command(pushPath,
-					"--source", "",
-					"--target", "",
-					"--nginx", config.Node.NginxPath,
-					"--purge", fmt.Sprintf("%s%s", domain, purgePath),
-					"--nodes", fmt.Sprintf(`[{"id":%d,"name":"%s","host":"%s","port":%d,"username":"%s","password":"%s"}]`,
-						n.ID, n.Name, n.Host, n.Port, n.Username, n.Password))
-				output, err := cmd.CombinedOutput()
-				if err != nil {
-					errCh <- fmt.Sprintf("Node %s failed: %v - %s", n.Name, err, string(output))
-					return
-				}
-			}
-		}(node)
-	}
-	wg.Wait()
-	close(errCh)
-
-	var errors []string
-	for e := range errCh {
-		errors = append(errors, e)
-	}
-
-	if len(errors) > 0 {
-		errorResponse(w, 500, strings.Join(errors, "; "))
+	if len(nodes) == 0 {
+		errorResponse(w, 400, "No nodes configured")
 		return
 	}
 
-	writeSystemLog("INFO", "cache", "Cache purged", fmt.Sprintf("site=%d path=%s", req.SiteID, purgePath))
+	nodesJSON, _ := json.Marshal(nodes)
+	pushPath := filepath.Join(".", "backend", "push", "main")
+
+	suffix := strings.TrimSpace(req.Suffix)
+	if suffix != "" {
+		// Step 1: generate config WITHOUT matching cache rules, push, reload
+		os.RemoveAll(config.Tmp.ConfDir)
+		os.MkdirAll(config.Tmp.ConfDir, 0755)
+		ngxgenPath := filepath.Join(".", "backend", "ngxgen", "main")
+		cmd1 := exec.Command(ngxgenPath,
+			"--db-host", config.Database.Host,
+			"--db-port", strconv.Itoa(config.Database.Port),
+			"--db-user", config.Database.User,
+			"--db-pass", config.Database.Password,
+			"--db-name", config.Database.DBName,
+			"--output", config.Tmp.ConfDir,
+			"--no-cache-site", strconv.Itoa(req.SiteID),
+			"--no-cache-suffix", suffix)
+		cmd1.Run()
+		cmd1p := exec.Command(pushPath,
+			"--source", config.Tmp.ConfDir,
+			"--target", config.Node.ConfigDir,
+			"--nginx", config.Node.NginxPath,
+			"--nodes", string(nodesJSON))
+		cmd1p.Run()
+	}
+
+	// Delete site cache directory on all nodes
+	purgeCmd := exec.Command(pushPath,
+		"--source", "",
+		"--target", "",
+		"--nginx", config.Node.NginxPath,
+		"--purge", strconv.Itoa(req.SiteID),
+		"--nodes", string(nodesJSON))
+	purgeCmd.Run()
+
+	if suffix != "" {
+		// Step 3: regenerate normal config WITH all cache rules, push, reload
+		os.RemoveAll(config.Tmp.ConfDir)
+		os.MkdirAll(config.Tmp.ConfDir, 0755)
+		ngxgenPath := filepath.Join(".", "backend", "ngxgen", "main")
+		cmd3 := exec.Command(ngxgenPath,
+			"--db-host", config.Database.Host,
+			"--db-port", strconv.Itoa(config.Database.Port),
+			"--db-user", config.Database.User,
+			"--db-pass", config.Database.Password,
+			"--db-name", config.Database.DBName,
+			"--output", config.Tmp.ConfDir)
+		cmd3.Run()
+		cmd3p := exec.Command(pushPath,
+			"--source", config.Tmp.ConfDir,
+			"--target", config.Node.ConfigDir,
+			"--nginx", config.Node.NginxPath,
+			"--nodes", string(nodesJSON))
+		cmd3p.Run()
+	}
+
+	writeSystemLog("INFO", "cache", "Cache purged", fmt.Sprintf("site=%d", req.SiteID))
 	successResponse(w, map[string]string{"status": "purge completed"})
 }
 
@@ -1967,9 +2033,9 @@ func startScheduler() {
 				lastSyncTime = time.Now()
 				doFullSync()
 			} else {
-				// Periodic sync without config change
-				log.Println("Scheduled sync: periodic sync without config change")
-				doFullSync()
+				log.Println("Scheduled sync: periodic sync")
+				lastSyncTime = time.Now()
+				go doFullSync()
 			}
 		}
 	}()
@@ -2023,6 +2089,7 @@ func main() {
 	startScheduler()
 	startTokenCleanup()
 	startLoginAttemptCleanup()
+	startSyncWorker()
 
 	// Graceful shutdown
 	go func() {

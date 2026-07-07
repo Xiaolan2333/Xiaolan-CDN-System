@@ -13,7 +13,7 @@ MySQL 5.7及以上
 MySQL数据库用户建议使用root
 
 ```Bash
-apt install wget unzip -y && wget -O Xiaolan-CDN-System-V0.1.1-Install.sh https://github.com/Xiaolan2333/Xiaolan-CDN-System/releases/download/Xiaolan-CDN-System-V0.1.1/Xiaolan-CDN-System-V0.1.1-Install.sh && chmod 777 Xiaolan-CDN-System-V0.1.0-Install.sh && ./Xiaolan-CDN-System-V0.1.0-Install.sh
+apt update && apt install wget unzip -y && wget -O Xiaolan-CDN-System-V0.1.2-Install.sh https://github.com/Xiaolan2333/Xiaolan-CDN-System/releases/download/Xiaolan-CDN-System-V0.1.2/Xiaolan-CDN-System-V0.1.2-Install.sh && chmod 777 Xiaolan-CDN-System-V0.1.2-Install.sh && bash ./Xiaolan-CDN-System-V0.1.2-Install.sh
 ```
 
 ### 手动安装（此处以V0.1.1作为演示，不包含MySQL安装）：

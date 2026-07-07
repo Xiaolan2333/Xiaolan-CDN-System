@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	_ "github.com/go-sql-driver/mysql"
@@ -37,6 +38,30 @@ type Site struct {
 	HTTP2Enabled     bool
 	HTTP3Enabled     bool
 	WebSocketEnabled bool
+}
+
+func siteCacheDir(siteID int) string {
+	return fmt.Sprintf("/opt/xiaolan-cdn/xiaolan-cdn-node/cache/site-%d", siteID)
+}
+
+func cacheZoneName(siteID int) string {
+	return fmt.Sprintf("cache_%d", siteID)
+}
+
+func appendSiteCachePaths(outputDir string, sites []Site) {
+	confPath := filepath.Join(outputDir, "nginx.conf")
+	data, err := os.ReadFile(confPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to read nginx.conf: %v\n", err)
+		return
+	}
+	var sb strings.Builder
+	for _, s := range sites {
+		fmt.Fprintf(&sb, "    proxy_cache_path %s levels=1:2 keys_zone=%s:100m max_size=10g inactive=7d use_temp_path=off;\n",
+			siteCacheDir(s.ID), cacheZoneName(s.ID))
+	}
+	content := strings.Replace(string(data), "#PROXY_CACHE_PATHS#\n", sb.String(), 1)
+	os.WriteFile(confPath, []byte(content), 0644)
 }
 
 type SiteDomain struct {
@@ -74,6 +99,9 @@ type IPBlacklist struct {
 	IPAddress string
 }
 
+var excludeCacheSiteID int
+var excludeCacheSuffixes map[string]bool
+
 func main() {
 	args := parseArgs()
 	db := connectDB(args)
@@ -82,11 +110,25 @@ func main() {
 	outputDir := args["output"]
 	os.MkdirAll(outputDir, 0755)
 
+	// Parse no-cache args
+	if args["no-cache-site"] != "" {
+		excludeCacheSiteID, _ = strconv.Atoi(args["no-cache-site"])
+		suffixStr := args["no-cache-suffix"]
+		if suffixStr != "" {
+			excludeCacheSuffixes = make(map[string]bool)
+			for _, s := range strings.Split(suffixStr, ",") {
+				excludeCacheSuffixes[strings.TrimSpace(s)] = true
+			}
+		}
+	}
+
 	// Generate main nginx.conf
 	generateMainConfig(outputDir)
 
 	// Get all sites
 	sites := getSites(db)
+	// Generate per-site cache paths in nginx.conf
+	appendSiteCachePaths(outputDir, sites)
 	for _, site := range sites {
 		generateSiteConfig(db, site, outputDir)
 	}
@@ -145,8 +187,6 @@ http {
 
     lua_package_path "/opt/xiaolan-cdn/xiaolan-cdn-node/lib/lua/?.lua;;";
 
-    proxy_cache_path /opt/xiaolan-cdn/xiaolan-cdn-node/cache/proxy levels=1:2 keys_zone=xiaolan_cache:100m max_size=10g inactive=7d use_temp_path=off;
-
     map $http_upgrade $connection_upgrade {
         default upgrade;
         ''      close;
@@ -171,6 +211,8 @@ http {
     gzip_types text/plain text/css application/json application/javascript text/xml application/xml text/javascript;
 
     include /opt/xiaolan-cdn/xiaolan-cdn-node/conf/sites-enabled/*.conf;
+
+#PROXY_CACHE_PATHS#
 }
 `
 	os.WriteFile(filepath.Join(outputDir, "nginx.conf"), []byte(config), 0644)
@@ -247,6 +289,12 @@ func getCacheRules(db *sql.DB, siteID int) []CacheRule {
 	for rows.Next() {
 		var r CacheRule
 		rows.Scan(&r.Suffix, &r.CacheTime)
+		// If this is a no-cache run for this site, exclude matching suffixes
+		if excludeCacheSiteID == siteID && excludeCacheSuffixes != nil {
+			if excludeCacheSuffixes[r.Suffix] || excludeCacheSuffixes["."+r.Suffix] {
+				continue
+			}
+		}
 		rules = append(rules, r)
 	}
 	return rules
@@ -381,13 +429,6 @@ func generateSiteConfig(db *sql.DB, site Site, outputDir string) {
 			sb.WriteString("    add_header Alt-Svc 'h3=\":443\"; ma=86400';\n")
 		}
 
-		// HTTP to HTTPS redirect
-		if site.HTTPSEnabled {
-			sb.WriteString("    if ($scheme = http) {\n")
-			sb.WriteString("        return 301 https://$host$request_uri;\n")
-			sb.WriteString("    }\n")
-		}
-
 	writeLocationBlock(&sb, site, db)
 	sb.WriteString("}\n\n")
 	}
@@ -436,6 +477,8 @@ func writeLocationBlock(sb *strings.Builder, site Site, db *sql.DB) {
 		sb.WriteString(fmt.Sprintf("    location %s%s {\n", locationMod, pattern))
 		sb.WriteString(fmt.Sprintf("        proxy_pass %s://%s;\n", rule.OriginScheme, rule.OriginAddress))
 		sb.WriteString("        proxy_ssl_server_name on;\n")
+		sb.WriteString("        proxy_hide_header Strict-Transport-Security;\n")
+		sb.WriteString("        proxy_hide_header Alt-Svc;\n")
 		if rule.OriginScheme == "https" {
 			sb.WriteString("        proxy_ssl_verify off;\n")
 		}
@@ -467,7 +510,7 @@ func writeLocationBlock(sb *strings.Builder, site Site, db *sql.DB) {
 			if ct != "" {
 				sb.WriteString(fmt.Sprintf("        expires %s;\n", ct))
 			}
-			sb.WriteString("        proxy_cache xiaolan_cache;\n")
+			sb.WriteString(fmt.Sprintf("        proxy_cache %s;\n", cacheZoneName(site.ID)))
 			sb.WriteString("        proxy_cache_key $scheme$proxy_host$uri$is_args$args;\n")
 			sb.WriteString("        proxy_cache_valid 200 301 302 1h;\n")
 			sb.WriteString("        proxy_cache_valid 404 1m;\n")
@@ -475,10 +518,17 @@ func writeLocationBlock(sb *strings.Builder, site Site, db *sql.DB) {
 			sb.WriteString("        proxy_no_cache $http_x_purge;\n")
 			sb.WriteString(fmt.Sprintf("        proxy_pass %s://%s;\n", site.OriginScheme, site.OriginAddress))
 			sb.WriteString("        proxy_ssl_server_name on;\n")
+			sb.WriteString("        proxy_hide_header Strict-Transport-Security;\n")
+			sb.WriteString("        proxy_hide_header Alt-Svc;\n")
 			if site.OriginScheme == "https" {
 				sb.WriteString("        proxy_ssl_verify off;\n")
 			}
-			if site.OriginHost != "" {
+	if site.HTTPSEnabled {
+		sb.WriteString("        if ($scheme = http) {\n")
+		sb.WriteString("            return 301 https://$host$request_uri;\n")
+		sb.WriteString("        }\n")
+	}
+	if site.OriginHost != "" {
 				sb.WriteString(fmt.Sprintf("        proxy_set_header Host %s;\n", site.OriginHost))
 			} else {
 				sb.WriteString("        proxy_set_header Host $host;\n")
@@ -494,6 +544,8 @@ func writeLocationBlock(sb *strings.Builder, site Site, db *sql.DB) {
 	sb.WriteString("    location / {\n")
 	sb.WriteString(fmt.Sprintf("        proxy_pass %s://%s;\n", site.OriginScheme, site.OriginAddress))
 	sb.WriteString("        proxy_ssl_server_name on;\n")
+	sb.WriteString("        proxy_hide_header Strict-Transport-Security;\n")
+	sb.WriteString("        proxy_hide_header Alt-Svc;\n")
 	if site.OriginScheme == "https" {
 		sb.WriteString("        proxy_ssl_verify off;\n")
 	}

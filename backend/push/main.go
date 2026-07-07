@@ -145,14 +145,10 @@ func pushToNodes(nodes []Node, sourceDir, targetDir, nginxPath string) []string 
 }
 
 func pushToNode(node Node, sourceDir, targetDir, nginxPath string) string {
-	mkdirCmd := fmt.Sprintf("mkdir -p %s /opt/xiaolan-cdn/xiaolan-cdn-node/cache/proxy", targetDir)
+	mkdirCmd := fmt.Sprintf("mkdir -p %s /opt/xiaolan-cdn/xiaolan-cdn-node/cache", targetDir)
 	if err := sshExec(node, mkdirCmd); err != nil {
 		return fmt.Sprintf("[FAIL] %s: mkdir failed - %v", node.Name, err)
 	}
-
-	// Clean conf dir except mime.types before uploading new configs
-	cleanCmd := fmt.Sprintf("find %s -mindepth 1 ! -name 'mime.types' -exec rm -rf {} + 2>/dev/null; true", targetDir)
-	sshExec(node, cleanCmd)
 
 	if err := scpUpload(node, sourceDir, targetDir); err != nil {
 		return fmt.Sprintf("[FAIL] %s: upload failed - %v", node.Name, err)
@@ -213,57 +209,55 @@ func createTarGz(sourceDir string, w io.Writer) error {
 
 	return filepath.Walk(sourceDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
-			return nil
+			return err
 		}
 		if info.IsDir() {
 			return nil
 		}
 
-		relPath, _ := filepath.Rel(sourceDir, path)
+		relPath, err := filepath.Rel(sourceDir, path)
+		if err != nil {
+			return err
+		}
 		relPath = filepath.ToSlash(relPath)
 
 		header, err := tar.FileInfoHeader(info, "")
 		if err != nil {
-			return nil
+			return err
 		}
 		header.Name = relPath
 
 		if err := tw.WriteHeader(header); err != nil {
-			return nil
+			return err
 		}
 
 		file, err := os.Open(path)
 		if err != nil {
-			return nil
+			return err
 		}
-		io.Copy(tw, file)
+		if _, err := io.Copy(tw, file); err != nil {
+			file.Close()
+			return err
+		}
 		file.Close()
 		return nil
 	})
 }
 
-func doCachePurge(nodesJSON, nginxPath, purgeURL string) {
+func doCachePurge(nodesJSON, nginxPath, siteID string) {
 	var nodes []Node
 	if err := json.Unmarshal([]byte(nodesJSON), &nodes); err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to parse nodes JSON: %v\n", err)
 		os.Exit(1)
 	}
 
-	slashIdx := strings.Index(purgeURL, "/")
-	if slashIdx < 0 {
-		fmt.Fprintf(os.Stderr, "Invalid purge URL: %s\n", purgeURL)
-		return
-	}
-	host := purgeURL[:slashIdx]
-	path := purgeURL[slashIdx:]
-
+	cacheDir := fmt.Sprintf("/opt/xiaolan-cdn/xiaolan-cdn-node/cache/site-%s", siteID)
 	for _, node := range nodes {
-		purgeCmd := fmt.Sprintf("curl -s -o /dev/null -w '%%{http_code}' -H 'Host: %s' -H 'X-Purge: 1' http://127.0.0.1%s", host, path)
-		ss, err := sshExecOutput(node, purgeCmd)
-		if err != nil {
+		cleanCmd := fmt.Sprintf("rm -rf %s && mkdir -p %s", cacheDir, cacheDir)
+		if err := sshExec(node, cleanCmd); err != nil {
 			fmt.Printf("[FAIL] %s: cache purge failed - %v\n", node.Name, err)
 		} else {
-			fmt.Printf("[OK] %s: cache purge - HTTP %s\n", node.Name, strings.TrimSpace(ss))
+			fmt.Printf("[OK] %s: cache purged (site %s)\n", node.Name, siteID)
 		}
 	}
 }

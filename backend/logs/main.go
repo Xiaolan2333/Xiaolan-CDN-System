@@ -147,6 +147,9 @@ func sshExec(node Node, command string) error {
 	}
 	defer session.Close()
 
+	timeout := time.AfterFunc(10*time.Second, func() { session.Close() })
+	defer timeout.Stop()
+
 	return session.Run(command)
 }
 
@@ -162,6 +165,10 @@ func sshDownload(node Node, remoteCmd string, w io.Writer) error {
 		return fmt.Errorf("SSH session failed: %v", err)
 	}
 	defer session.Close()
+
+	// Set timeout for the session
+	timeout := time.AfterFunc(30*time.Second, func() { session.Close() })
+	defer timeout.Stop()
 
 	session.Stdout = w
 	var stderrBuf bytes.Buffer
@@ -179,26 +186,40 @@ func collectLogsFromNode(node Node, logDir, tmpDir string) ([]AccessLogEntry, er
 
 	localFile := filepath.Join(nodeTmpDir, "logs.tar.gz")
 
-	// Download both access and error logs compressed via SSH
-	remoteCmd := fmt.Sprintf("cd %s && tar czf - access.log* error.log* 2>/dev/null", logDir)
-	outFile, err := os.Create(localFile)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create local file: %v", err)
+	// Download both access and error logs compressed via SSH (retry once)
+	remoteCmd := fmt.Sprintf("cd %s && tar czf - access.log* error.log* 2>/dev/null; true", logDir)
+	var downloadErr error
+	for attempt := 0; attempt < 2; attempt++ {
+		outFile, err := os.Create(localFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create local file: %v", err)
+		}
+		downloadErr = sshDownload(node, remoteCmd, outFile)
+		outFile.Close()
+		if downloadErr == nil {
+			break
+		}
+		os.Remove(localFile)
+		if attempt == 0 {
+			time.Sleep(time.Second)
+		}
+	}
+	if downloadErr != nil {
+		return nil, fmt.Errorf("failed to download logs from node %s: %v", node.Name, downloadErr)
 	}
 
-	if err := sshDownload(node, remoteCmd, outFile); err != nil {
-		outFile.Close()
-		return nil, fmt.Errorf("failed to download logs: %v", err)
+	// Check that we got actual data
+	info, err := os.Stat(localFile)
+	if err != nil || info.Size() < 22 {
+		return nil, nil
 	}
-	outFile.Close()
 
 	// Extract tar.gz
 	extractDir := filepath.Join(nodeTmpDir, "extracted")
 	os.MkdirAll(extractDir, 0755)
 
 	if err := extractTarGz(localFile, extractDir); err != nil {
-		entries, _ := parseLogFile(localFile, node.ID)
-		return entries, nil
+		return nil, fmt.Errorf("failed to extract logs from node %s: %v", node.Name, err)
 	}
 
 	// Parse all extracted log files
@@ -314,6 +335,9 @@ func parseLogLine(line string, nodeID int) (AccessLogEntry, error) {
 		return entry, fmt.Errorf("invalid status: %s", statusStr)
 	}
 	entry.StatusCode = status
+	if status == 0 {
+		return entry, fmt.Errorf("invalid status code: 0")
+	}
 	pos += statusEnd + 1
 
 	domainEnd := strings.IndexByte(line[pos:], ' ')
@@ -401,6 +425,24 @@ func parseLogLine(line string, nodeID int) (AccessLogEntry, error) {
 		}
 	}
 
+	// Fallback: parse bytes from end of line (last space-separated token)
+	if entry.BytesSent == 0 {
+		lastSpace := strings.LastIndexByte(line, ' ')
+		if lastSpace > 0 {
+			lastToken := strings.TrimSpace(line[lastSpace:])
+			if lastToken != "" && lastToken != "-" {
+				if b, err := strconv.ParseInt(lastToken, 10, 64); err == nil {
+					entry.BytesSent = b
+				}
+			}
+		}
+	}
+
+	// Discard entries with unparseable IP
+	if entry.ClientIP == "" || entry.ClientIP == "-" {
+		return entry, fmt.Errorf("invalid client IP")
+	}
+
 	return entry, nil
 }
 
@@ -421,6 +463,9 @@ func parseErrorLogFile(filePath string, nodeID int) ([]AccessLogEntry, error) {
 			continue
 		}
 		entry := parseErrorLogLine(line, nodeID)
+		if entry.ClientIP == "" || entry.ClientIP == "-" {
+			continue
+		}
 		entries = append(entries, entry)
 	}
 	return entries, scanner.Err()
